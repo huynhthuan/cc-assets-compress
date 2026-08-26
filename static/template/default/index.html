@@ -1,0 +1,548 @@
+<div id="app" class="asset-browser">
+    <header class="toolbar">
+        <div>
+            <h1>Tài nguyên Media</h1>
+            <span class="status">{{ statusText }}</span>
+        </div>
+        <ui-button @click="loadAssets" :disabled="loading">
+            {{ loading ? 'Đang tải...' : 'Tải lại' }}
+        </ui-button>
+    </header>
+
+    <div class="filters">
+        <label class="search-box">
+            <span>Tìm kiếm</span>
+            <input
+                v-model="searchQuery"
+                type="search"
+                placeholder="Tên file hoặc đường dẫn..."
+                spellcheck="false"
+            />
+        </label>
+        <label class="type-filter">
+            <span>Loại tài nguyên</span>
+            <select v-model="extensionFilter">
+                <option value="">Tất cả</option>
+                <option value=".png">PNG</option>
+                <option value=".jpg">JPG</option>
+                <option value=".mp3">MP3</option>
+            </select>
+        </label>
+    </div>
+
+    <div v-if="errorMessage" class="message error">
+        Không thể tải tài nguyên: {{ errorMessage }}
+    </div>
+
+    <div v-else-if="!loading && visibleAssets.length === 0" class="message empty">
+        {{ assets.length === 0
+            ? 'Không tìm thấy tệp .png, .jpg hoặc .mp3 trong thư mục assets.'
+            : 'Không có tài nguyên phù hợp với bộ lọc.' }}
+    </div>
+
+    <div v-else-if="visibleAssets.length > 0" class="table-wrapper">
+        <table class="asset-table">
+            <thead>
+                <tr>
+                    <th class="preview-column">Preview</th>
+                    <th class="name-column">Tên file</th>
+                    <th>Đường dẫn</th>
+                    <th
+                        class="size-column sortable"
+                        :class="{ active: sortColumn === 'size' }"
+                        @click="toggleSort('size')"
+                        title="Sắp xếp theo kích thước file"
+                    >
+                        Kích thước
+                        <span class="sort-indicator">{{ sortIndicator('size') }}</span>
+                    </th>
+                    <th
+                        class="metric-column sortable"
+                        :class="{ active: sortColumn === 'base64Size' }"
+                        @click="toggleSort('base64Size')"
+                        title="Sắp xếp theo kích thước Base64"
+                    >
+                        Base64
+                        <span class="sort-indicator">{{ sortIndicator('base64Size') }}</span>
+                    </th>
+                    <th
+                        class="metric-column sortable"
+                        :class="{ active: sortColumn === 'zipSize' }"
+                        @click="toggleSort('zipSize')"
+                        title="Sắp xếp theo kích thước Base64 nén bằng JSZip"
+                    >
+                        Base64 + JSZip
+                        <span class="sort-indicator">{{ sortIndicator('zipSize') }}</span>
+                    </th>
+                    <th class="action-column">Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr v-for="asset in paginatedAssets" :key="asset.uuid">
+                    <td>
+                        <div class="preview">
+                            <img
+                                v-if="isImage(asset)"
+                                :src="asset.previewUrl"
+                                :alt="asset.name"
+                                loading="lazy"
+                            />
+                            <span v-else class="audio-icon" role="img" aria-label="Tệp âm thanh">♪</span>
+                        </div>
+                    </td>
+                    <td class="file-name" :title="asset.name">{{ asset.name }}</td>
+                    <td class="file-path" :title="asset.path">{{ asset.path }}</td>
+                    <td class="file-size">{{ formatFileSize(asset.size) }}</td>
+                    <td class="file-size">{{ formatFileSize(asset.base64Size) }}</td>
+                    <td class="file-size">{{ formatFileSize(asset.zipSize) }}</td>
+                    <td class="action-cell">
+                        <ui-button @click="openAssetDetails(asset)">Chi tiết</ui-button>
+                        <ui-button class="blue" @click="openCompression(asset)">Compress</ui-button>
+                        <ui-button
+                            class="revert-button"
+                            :disabled="!asset.canRevert"
+                            :title="asset.canRevert ? 'Khôi phục file trước lần compress đầu tiên' : 'Chưa có bản backup'"
+                            @click="revertAsset(asset)"
+                        >Revert</ui-button>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <footer v-if="visibleAssets.length > 0" class="pagination">
+        <div class="page-size">
+            <label for="page-size">Hiển thị</label>
+            <select id="page-size" v-model.number="pageSize">
+                <option :value="10">10</option>
+                <option :value="25">25</option>
+                <option :value="50">50</option>
+                <option :value="100">100</option>
+            </select>
+            <span>item mỗi trang</span>
+        </div>
+
+        <span class="page-range">{{ pageRangeText }}</span>
+
+        <nav class="page-navigation" aria-label="Phân trang">
+            <ui-button
+                title="Trang trước"
+                :disabled="currentPage === 1"
+                @click="goToPage(currentPage - 1)"
+            >‹</ui-button>
+            <ui-button
+                v-for="page in pageNumbers"
+                :key="page"
+                :class="{ 'current-page': page === currentPage }"
+                @click="goToPage(page)"
+            >{{ page }}</ui-button>
+            <ui-button
+                title="Trang sau"
+                :disabled="currentPage === totalPages"
+                @click="goToPage(currentPage + 1)"
+            >›</ui-button>
+        </nav>
+    </footer>
+
+    <div
+        v-if="selectedAsset"
+        class="modal-backdrop"
+        role="presentation"
+        @click.self="closeAssetDetails"
+    >
+        <section class="asset-modal" role="dialog" aria-modal="true" aria-labelledby="asset-detail-title">
+            <header class="modal-header">
+                <div>
+                    <h2 id="asset-detail-title">Chi tiết tài nguyên</h2>
+                    <span>{{ selectedAsset.name }}</span>
+                </div>
+                <button class="close-button" type="button" title="Đóng" @click="closeAssetDetails">×</button>
+            </header>
+
+            <div class="modal-body">
+                <div class="detail-preview">
+                    <image-viewer
+                        v-if="isImage(selectedAsset)"
+                        :src="selectedAsset.previewUrl"
+                        :alt="selectedAsset.name"
+                    ></image-viewer>
+                    <div v-else class="audio-detail">
+                        <span class="large-audio-icon" role="img" aria-label="Tệp âm thanh">♪</span>
+                        <audio :src="selectedAsset.previewUrl" controls preload="metadata"></audio>
+                    </div>
+                </div>
+
+                <dl class="asset-information">
+                    <div>
+                        <dt>Tên file</dt>
+                        <dd>{{ selectedAsset.name }}</dd>
+                    </div>
+                    <div>
+                        <dt>Loại</dt>
+                        <dd>{{ selectedAsset.extension.replace('.', '').toUpperCase() }}</dd>
+                    </div>
+                    <div>
+                        <dt>Đường dẫn asset</dt>
+                        <dd :title="selectedAsset.path">{{ selectedAsset.path }}</dd>
+                    </div>
+                    <div>
+                        <dt>Đường dẫn tuyệt đối</dt>
+                        <dd :title="selectedAsset.filePath">{{ selectedAsset.filePath }}</dd>
+                    </div>
+                    <div>
+                        <dt>UUID</dt>
+                        <dd>{{ selectedAsset.uuid }}</dd>
+                    </div>
+                    <div>
+                        <dt>Kích thước gốc</dt>
+                        <dd>{{ formatFileSize(selectedAsset.size) }} ({{ selectedAsset.size.toLocaleString() }} bytes)</dd>
+                    </div>
+                    <div>
+                        <dt>Kích thước Base64</dt>
+                        <dd>{{ base64Size === null ? 'Đang tính...' : `${formatFileSize(base64Size)} (${base64Size.toLocaleString()} bytes)` }}</dd>
+                    </div>
+                    <div>
+                        <dt>Base64 nén bằng JSZip</dt>
+                        <dd>
+                            <template v-if="compressedSize !== null">
+                                {{ formatFileSize(compressedSize) }} ({{ compressedSize.toLocaleString() }} bytes)
+                                <span
+                                    class="compression-result"
+                                    :class="{ effective: compressedSize < selectedAsset.size }"
+                                >{{ compressionResult() }}</span>
+                            </template>
+                            <template v-else>{{ detailLoading ? 'Đang nén...' : 'Không có' }}</template>
+                        </dd>
+                    </div>
+                </dl>
+
+                <div v-if="detailError" class="detail-error">
+                    Không thể tính dung lượng: {{ detailError }}
+                </div>
+            </div>
+
+            <footer class="modal-footer">
+                <ui-button @click="closeAssetDetails">Đóng</ui-button>
+            </footer>
+        </section>
+    </div>
+
+    <div
+        v-if="compressionAsset"
+        class="modal-backdrop"
+        role="presentation"
+        @click.self="closeCompression"
+    >
+        <section
+            class="asset-modal compression-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="compression-title"
+            @keydown.stop
+            @keyup.stop
+            @keypress.stop
+        >
+            <header class="modal-header">
+                <div>
+                    <h2 id="compression-title">Compress tài nguyên</h2>
+                    <span>{{ compressionAsset.name }}</span>
+                </div>
+                <button class="close-button" type="button" title="Đóng" @click="closeCompression">×</button>
+            </header>
+
+            <div class="modal-body">
+                <div v-if="!isCompressionSupported(compressionAsset)" class="unsupported-message">
+                    <strong>Không hỗ trợ JPG bằng pngquant.</strong>
+                    <span>pngquant chỉ nhận đầu vào PNG. File này sẽ không bị thay đổi.</span>
+                </div>
+
+                <template v-else>
+                    <section v-if="isImage(compressionAsset)" class="compression-section">
+                        <h3>Thư viện compress</h3>
+                        <div class="compressor-selector">
+                            <label>
+                                <input
+                                    v-model="imageCompressor"
+                                    type="radio"
+                                    value="pngquant"
+                                    :disabled="compressionAsset.extension === '.jpg'"
+                                    @change="changeImageCompressor"
+                                />
+                                <span>pngquant</span>
+                                <small>Tối ưu ảnh PNG bằng bảng màu</small>
+                            </label>
+                            <label>
+                                <input
+                                    v-model="imageCompressor"
+                                    type="radio"
+                                    value="sharp"
+                                    @change="changeImageCompressor"
+                                />
+                                <span>Sharp</span>
+                                <small>Hỗ trợ PNG và JPG</small>
+                            </label>
+                        </div>
+                        <p v-if="compressionAsset.extension === '.jpg'" class="engine-note">
+                            JPG mặc định dùng Sharp vì pngquant chỉ hỗ trợ PNG.
+                        </p>
+                    </section>
+
+                    <section v-if="isImage(compressionAsset) && imageDimensions" class="compression-section resize-section">
+                        <h3>Resize ảnh — giữ nguyên tỷ lệ {{ imageDimensions.width }} × {{ imageDimensions.height }}</h3>
+                        <div class="resize-mode">
+                            <label>
+                                <input v-model="resizeMode" type="radio" value="percent" @change="changeResizeMode" />
+                                Theo phần trăm
+                            </label>
+                            <label>
+                                <input v-model="resizeMode" type="radio" value="pixels" @change="changeResizeMode" />
+                                Nhập kích thước
+                            </label>
+                        </div>
+
+                        <div v-if="resizeMode === 'percent'" class="settings-grid resize-settings">
+                            <label>
+                                <span>Tỷ lệ (%)</span>
+                                <input
+                                    v-model.number="resizePercent"
+                                    type="number"
+                                    min="1"
+                                    max="1000"
+                                    step="1"
+                                    @input="updateResizeFromPercent"
+                                />
+                            </label>
+                            <div class="resize-result">
+                                Kết quả: {{ resizeWidth }} × {{ resizeHeight }} px
+                            </div>
+                        </div>
+
+                        <div v-else class="settings-grid resize-settings">
+                            <label>
+                                <span>Width (px)</span>
+                                <input
+                                    v-model.number="resizeWidth"
+                                    type="number"
+                                    min="1"
+                                    max="16384"
+                                    @input="updateResizeFromWidth"
+                                />
+                            </label>
+                            <span class="aspect-lock" title="Luôn giữ tỷ lệ ảnh gốc">🔒</span>
+                            <label>
+                                <span>Height (px)</span>
+                                <input
+                                    v-model.number="resizeHeight"
+                                    type="number"
+                                    min="1"
+                                    max="16384"
+                                    @input="updateResizeFromHeight"
+                                />
+                            </label>
+                        </div>
+                    </section>
+
+                    <section class="compression-section">
+                        <h3>Preset</h3>
+                        <div class="preset-buttons">
+                            <ui-button
+                                :class="{ blue: compressionPreset === 'high' }"
+                                @click="applyCompressionPreset('high')"
+                            >Chất lượng cao</ui-button>
+                            <ui-button
+                                :class="{ blue: compressionPreset === 'balanced' }"
+                                @click="applyCompressionPreset('balanced')"
+                            >Cân bằng</ui-button>
+                            <ui-button
+                                :class="{ blue: compressionPreset === 'small' }"
+                                @click="applyCompressionPreset('small')"
+                            >Dung lượng nhỏ</ui-button>
+                            <span v-if="compressionPreset === 'custom'" class="custom-badge">Custom</span>
+                        </div>
+                    </section>
+
+                    <section class="compression-section">
+                        <h3>Thông số {{ compressionAsset.extension === '.mp3' ? 'FFmpeg' : imageCompressor }}</h3>
+                        <div v-if="isImage(compressionAsset) && imageCompressor === 'pngquant'" class="settings-grid">
+                            <label>
+                                <span>Quality Min</span>
+                                <input v-model.number="compressionSettings.qualityMin" type="number" min="0" max="100" @input="useCustomCompressionSettings" />
+                            </label>
+                            <label>
+                                <span>Quality Max</span>
+                                <input v-model.number="compressionSettings.qualityMax" type="number" min="0" max="100" @input="useCustomCompressionSettings" />
+                            </label>
+                            <label>
+                                <span>Speed (1-11)</span>
+                                <input v-model.number="compressionSettings.speed" type="number" min="1" max="11" @input="useCustomCompressionSettings" />
+                            </label>
+                            <label>
+                                <span>Số lượng màu (2-256)</span>
+                                <input v-model.number="compressionSettings.colors" type="number" min="2" max="256" @input="useCustomCompressionSettings" />
+                            </label>
+                            <label>
+                                <span>Dithering (0-1)</span>
+                                <input v-model.number="compressionSettings.dithering" type="number" min="0" max="1" step="0.1" @input="useCustomCompressionSettings" />
+                            </label>
+                        </div>
+                        <p
+                            v-if="isImage(compressionAsset) && imageCompressor === 'pngquant'"
+                            class="engine-note"
+                        >
+                            Nếu số màu đã chọn không thể đạt Quality Min, pngquant sẽ tự thử lại với Min = 0 để tránh exit code 99.
+                        </p>
+
+                        <div v-else-if="isImage(compressionAsset)" class="settings-grid">
+                            <label>
+                                <span>Quality (1-100)</span>
+                                <input v-model.number="compressionSettings.sharpQuality" type="number" min="1" max="100" @input="useCustomCompressionSettings" />
+                            </label>
+                            <label v-if="compressionAsset.extension === '.png'">
+                                <span>Compression level (0-9)</span>
+                                <input v-model.number="compressionSettings.sharpCompressionLevel" type="number" min="0" max="9" @input="useCustomCompressionSettings" />
+                            </label>
+                            <label v-if="compressionAsset.extension === '.png'">
+                                <span>Số lượng màu (2-256)</span>
+                                <input v-model.number="compressionSettings.colors" type="number" min="2" max="256" @input="useCustomCompressionSettings" />
+                            </label>
+                            <label v-if="compressionAsset.extension === '.png'">
+                                <span>Dithering (0-1)</span>
+                                <input v-model.number="compressionSettings.dithering" type="number" min="0" max="1" step="0.1" @input="useCustomCompressionSettings" />
+                            </label>
+                            <label class="checkbox-setting">
+                                <input v-model="compressionSettings.sharpProgressive" type="checkbox" @change="useCustomCompressionSettings" />
+                                <span>Progressive</span>
+                            </label>
+                            <label v-if="compressionAsset.extension === '.png'" class="checkbox-setting">
+                                <input v-model="compressionSettings.sharpPalette" type="checkbox" @change="useCustomCompressionSettings" />
+                                <span>Palette PNG</span>
+                            </label>
+                            <label v-if="compressionAsset.extension === '.jpg'" class="checkbox-setting">
+                                <input v-model="compressionSettings.sharpMozjpeg" type="checkbox" @change="useCustomCompressionSettings" />
+                                <span>MozJPEG</span>
+                            </label>
+                            <label v-if="compressionAsset.extension === '.jpg'">
+                                <span>Chroma subsampling</span>
+                                <select v-model="compressionSettings.sharpChromaSubsampling" @change="useCustomCompressionSettings">
+                                    <option value="4:2:0">4:2:0</option>
+                                    <option value="4:4:4">4:4:4</option>
+                                </select>
+                            </label>
+                        </div>
+
+                        <div v-else class="settings-grid">
+                            <label>
+                                <span>Bitrate (kbps)</span>
+                                <input v-model.number="compressionSettings.audioBitrate" type="number" min="8" max="320" @input="useCustomCompressionSettings" />
+                            </label>
+                            <label>
+                                <span>Sample rate (Hz)</span>
+                                <select v-model.number="compressionSettings.sampleRate" @change="useCustomCompressionSettings">
+                                    <option :value="8000">8000</option>
+                                    <option :value="16000">16000</option>
+                                    <option :value="22050">22050</option>
+                                    <option :value="32000">32000</option>
+                                    <option :value="44100">44100</option>
+                                    <option :value="48000">48000</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>Channels</span>
+                                <select v-model.number="compressionSettings.channels" @change="useCustomCompressionSettings">
+                                    <option :value="1">Mono</option>
+                                    <option :value="2">Stereo</option>
+                                </select>
+                            </label>
+                        </div>
+                    </section>
+
+                    <div class="preview-action">
+                        <ui-button class="blue" :disabled="compressionLoading" @click="createCompressionPreview">
+                            {{ compressionLoading ? 'Đang compress...' : 'Tạo preview' }}
+                        </ui-button>
+                    </div>
+
+                    <div v-if="compressionError" class="detail-error">{{ compressionError }}</div>
+
+                    <section class="compression-section">
+                        <h3>Preview trước và sau</h3>
+                        <div class="compression-previews">
+                            <div>
+                                <span class="preview-label">File gốc</span>
+                                <div class="compressed-media-preview">
+                                    <image-viewer
+                                        v-if="isImage(compressionAsset)"
+                                        :src="compressionAsset.previewUrl"
+                                        :alt="compressionAsset.name"
+                                    ></image-viewer>
+                                    <audio v-else :src="compressionAsset.previewUrl" controls preload="metadata"></audio>
+                                </div>
+                            </div>
+                            <div>
+                                <span class="preview-label">Sau compress</span>
+                                <div class="compressed-media-preview empty-preview" :class="{ ready: compressedPreviewUrl }">
+                                    <image-viewer
+                                        v-if="compressedPreviewUrl && isImage(compressionAsset)"
+                                        :src="compressedPreviewUrl"
+                                        alt="Preview sau khi compress"
+                                    ></image-viewer>
+                                    <audio
+                                        v-else-if="compressedPreviewUrl"
+                                        :src="compressedPreviewUrl"
+                                        controls
+                                        preload="metadata"
+                                    ></audio>
+                                    <span v-else>Chưa tạo preview</span>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="compression-section">
+                        <h3>So sánh dung lượng</h3>
+                        <table class="metrics-table">
+                            <thead>
+                                <tr>
+                                    <th>Chỉ số</th>
+                                    <th>Trước</th>
+                                    <th>Sau</th>
+                                    <th>Thay đổi</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>File</td>
+                                    <td>{{ originalMetrics ? formatFileSize(originalMetrics.fileSize) : 'Đang tính...' }}</td>
+                                    <td>{{ outputMetrics ? formatFileSize(outputMetrics.fileSize) : '—' }}</td>
+                                    <td>{{ outputMetrics && originalMetrics ? metricDifference(originalMetrics.fileSize, outputMetrics.fileSize) : '—' }}</td>
+                                </tr>
+                                <tr>
+                                    <td>Base64</td>
+                                    <td>{{ originalMetrics ? formatFileSize(originalMetrics.base64Size) : 'Đang tính...' }}</td>
+                                    <td>{{ outputMetrics ? formatFileSize(outputMetrics.base64Size) : '—' }}</td>
+                                    <td>{{ outputMetrics && originalMetrics ? metricDifference(originalMetrics.base64Size, outputMetrics.base64Size) : '—' }}</td>
+                                </tr>
+                                <tr>
+                                    <td>Base64 + JSZip (DEFLATE 9)</td>
+                                    <td>{{ originalMetrics ? formatFileSize(originalMetrics.zipSize) : 'Đang tính...' }}</td>
+                                    <td>{{ outputMetrics ? formatFileSize(outputMetrics.zipSize) : '—' }}</td>
+                                    <td>{{ outputMetrics && originalMetrics ? metricDifference(originalMetrics.zipSize, outputMetrics.zipSize) : '—' }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </section>
+                </template>
+            </div>
+
+            <footer class="modal-footer">
+                <ui-button @click="closeCompression">Hủy</ui-button>
+                <ui-button
+                    v-if="isCompressionSupported(compressionAsset)"
+                    class="blue"
+                    :disabled="!outputMetrics || compressionLoading || compressionApplying"
+                    @click="applyCompressedAsset"
+                >{{ compressionApplying ? 'Đang áp dụng...' : 'Áp dụng và ghi đè' }}</ui-button>
+            </footer>
+        </section>
+    </div>
+</div>
