@@ -4,8 +4,10 @@ import { dirname, join } from 'path';
 import JSZip from 'jszip';
 import ffmpegPath from 'ffmpeg-static';
 import sharp from 'sharp';
+import { t } from './i18n';
 
 export type ImageCompressor = 'pngquant' | 'sharp';
+export type ConversionExtension = '.png' | '.jpg' | '.webp' | '.mp3' | '.wav' | '.ogg';
 
 export interface FileMetrics {
     fileSize: number;
@@ -62,7 +64,7 @@ function runBinary(binary: string, args: string[]): Promise<void> {
                 return;
             }
             reject(new BinaryProcessError(
-                errorOutput.trim() || `Compression process exited with code ${exitCode}.`,
+                errorOutput.trim() || t('errors.binary_exit', { code: exitCode ?? 'unknown' }),
                 exitCode,
             ));
         });
@@ -72,7 +74,7 @@ function runBinary(binary: string, args: string[]): Promise<void> {
 function getPngquantPath(): string {
     const extensionPath = Editor.Package.getPath('cc-assets-compress');
     if (!extensionPath) {
-        throw new Error('Không tìm thấy thư mục extension cc-assets-compress.');
+        throw new Error(t('errors.extension_path'));
     }
     const executable = process.platform === 'win32' ? 'pngquant.exe' : 'pngquant';
     return join(extensionPath, 'node_modules', 'pngquant-bin', 'vendor', executable);
@@ -99,7 +101,7 @@ export async function calculateFileMetrics(filePath: string, fileName: string): 
 export async function getImageDimensions(filePath: string): Promise<ImageDimensions> {
     const metadata = await sharp(filePath).metadata();
     if (!metadata.width || !metadata.height) {
-        throw new Error('Không thể đọc kích thước ảnh.');
+        throw new Error(t('errors.image_dimensions'));
     }
     return { width: metadata.width, height: metadata.height };
 }
@@ -146,7 +148,7 @@ export async function compressFile(
     if (extension === '.png' && imageCompressor === 'pngquant') {
         const pngquantPath = getPngquantPath();
         if (!await pathExists(pngquantPath)) {
-            throw new Error('Không tìm thấy binary pngquant. Hãy cài lại dependency của extension.');
+            throw new Error(t('errors.pngquant_missing'));
         }
 
         const outputPath = join(outputDirectory, 'compressed.png');
@@ -197,7 +199,7 @@ export async function compressFile(
 
     if (extension === '.mp3') {
         if (!ffmpegPath || !await pathExists(ffmpegPath)) {
-            throw new Error('Không tìm thấy binary FFmpeg. Hãy cài lại dependency của extension.');
+            throw new Error(t('errors.ffmpeg_missing'));
         }
 
         const outputPath = join(outputDirectory, 'compressed.mp3');
@@ -217,7 +219,50 @@ export async function compressFile(
         return outputPath;
     }
 
-    throw new Error('pngquant chỉ hỗ trợ ảnh PNG. Hãy chọn Sharp để nén file JPG.');
+    throw new Error(t('errors.pngquant_jpg'));
+}
+
+export async function convertFile(
+    inputPath: string,
+    targetExtension: ConversionExtension,
+    outputDirectory: string,
+): Promise<string> {
+    await ensureDir(outputDirectory);
+    const outputPath = join(outputDirectory, `converted${targetExtension}`);
+
+    if (targetExtension === '.png') {
+        await sharp(inputPath).png().toFile(outputPath);
+        return outputPath;
+    }
+    if (targetExtension === '.jpg') {
+        await sharp(inputPath).jpeg({ quality: 92, progressive: true }).toFile(outputPath);
+        return outputPath;
+    }
+    if (targetExtension === '.webp') {
+        await sharp(inputPath).webp({ quality: 90 }).toFile(outputPath);
+        return outputPath;
+    }
+
+    if (!ffmpegPath || !await pathExists(ffmpegPath)) {
+        throw new Error(t('errors.ffmpeg_missing'));
+    }
+
+    const audioArguments: Record<'.mp3' | '.wav' | '.ogg', string[]> = {
+        '.mp3': ['-codec:a', 'libmp3lame', '-b:a', '192k'],
+        '.wav': ['-codec:a', 'pcm_s16le'],
+        '.ogg': ['-codec:a', 'libvorbis', '-q:a', '5'],
+    };
+    await runBinary(ffmpegPath, [
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-y',
+        '-i', inputPath,
+        '-map_metadata', '0',
+        '-vn',
+        ...audioArguments[targetExtension],
+        outputPath,
+    ]);
+    return outputPath;
 }
 
 export async function replaceOriginalFile(compressedPath: string, originalPath: string): Promise<void> {
@@ -240,7 +285,7 @@ export async function createOriginalBackup(originalPath: string, backupPath: str
 
 export async function restoreOriginalBackup(backupPath: string, originalPath: string): Promise<void> {
     if (!await pathExists(backupPath)) {
-        throw new Error('Không tìm thấy file backup để khôi phục.');
+        throw new Error(t('errors.backup_missing'));
     }
     await replaceOriginalFile(backupPath, originalPath);
     await remove(backupPath);
